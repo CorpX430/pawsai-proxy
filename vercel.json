@@ -14,5 +14,8 @@
         { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" }
       ]
     }
-  ]
+  ],
+  "analytics": {
+    "enable": true
+  }
 }
