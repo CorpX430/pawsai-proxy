@@ -1,0 +1,60 @@
+# PawsAI Proxy — Deploy to Vercel
+
+This is a lightweight serverless proxy that forwards requests from the PawsAI React app
+to football-data.org, adding the API token server-side and enabling CORS.
+
+-----
+
+## Deploy in 3 steps
+
+### 1. Install Vercel CLI
+
+```bash
+npm install -g vercel
+```
+
+### 2. Deploy
+
+```bash
+cd pawsai-proxy
+vercel deploy --prod
+```
+
+Follow the prompts:
+
+- Set up a new project: **Y**
+- Project name: **pawsai-proxy**
+- Directory: **./** (current)
+
+### 3. Copy your deployment URL
+
+After deploy you’ll get a URL like:
+
+```
+https://pawsai-proxy-yourname.vercel.app
+```
+
+**Paste that URL into the React app** where it says `YOUR_PROXY_URL`.
+
+-----
+
+## Environment variable (optional — more secure)
+
+Instead of hardcoding the API token, set it in Vercel:
+
+```bash
+vercel env add FOOTBALL_API_TOKEN
+# paste: a9eec63f7987406e8693b8aedb50ee7d
+```
+
+-----
+
+## Test your proxy
+
+Once deployed, visit:
+
+```
+https://pawsai-proxy-yourname.vercel.app/api/football?path=/v4/competitions/PL/matches&status=SCHEDULED
+```
+
+You should see live JSON match data.

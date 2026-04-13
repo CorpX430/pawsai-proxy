@@ -1,0 +1,15 @@
+{
+  "name": "pawsai-proxy",
+  "version": "1.0.0",
+  "description": "PawsAI football data proxy for Vercel",
+  "main": "api/football.js",
+  "engines": {
+    "node": "18.x"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "devDependencies": {
+    "vercel": "^33.0.0"
+  }
+}

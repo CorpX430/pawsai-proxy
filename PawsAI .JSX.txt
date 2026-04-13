@@ -1,0 +1,528 @@
+import { useState, useEffect, useCallback, useRef } from “react”;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔧 AFTER deploying pawsai-proxy to Vercel, replace this with your actual URL
+// e.g. “https://pawsai-proxy-tesla.vercel.app”
+const PROXY_URL = “https://pawsai-proxy.vercel.app”;
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LEAGUES = [
+{ id:“PL”,  name:“Premier League”,   country:“🏴󠁧󠁢󠁥󠁮󠁧󠁿”, short:“EPL”, color:”#38003c”, accent:”#00ff85” },
+{ id:“SA”,  name:“Serie A”,          country:“🇮🇹”, short:“ITA”, color:”#024694”, accent:”#e8003d” },
+{ id:“PD”,  name:“La Liga”,          country:“🇪🇸”, short:“ESP”, color:”#ee6600”, accent:”#c60b1e” },
+{ id:“BL1”, name:“Bundesliga”,       country:“🇩🇪”, short:“BUN”, color:”#d20515”, accent:”#ffcc00” },
+{ id:“FL1”, name:“Ligue 1”,          country:“🇫🇷”, short:“FRA”, color:”#003f94”, accent:”#e30613” },
+{ id:“CL”,  name:“Champions League”, country:“🌍”,  short:“UCL”, color:”#001d6c”, accent:”#ffd700” },
+];
+
+const REFRESH_MS = 30000;
+
+function sr(str, n) {
+let h = n * 2654435761;
+for (let i = 0; i < str.length; i++) h = Math.imul(h ^ str.charCodeAt(i), 2654435761);
+return ((h >>> 0) % 1000) / 1000;
+}
+function predict(home, away) {
+const k = `${home}|${away}`;
+const hw = Math.round(28 + sr(k,1)*38);
+const dr = Math.round(14 + sr(k,2)*22);
+const aw = Math.max(5, 100 - hw - dr);
+const hg = (0.7 + sr(k,3)*1.8).toFixed(1);
+const ag = (0.5 + sr(k,4)*1.5).toFixed(1);
+const btts= Math.round(38 + sr(k,5)*35);
+const o25 = Math.round(42 + sr(k,6)*32);
+const conf= Math.round(52 + sr(k,7)*38);
+const tips= [
+{ label:“Home Win”, value:hw, odds:(100/hw*0.88).toFixed(2) },
+{ label:“Draw”,     value:dr, odds:(100/dr*0.88).toFixed(2) },
+{ label:“Away Win”, value:aw, odds:(100/aw*0.88).toFixed(2) },
+];
+const best = tips.reduce((a,b) => a.value > b.value ? a : b);
+return { hw, dr, aw, hg, ag, btts, o25, conf, best };
+}
+
+function uiStatus(m) {
+const s = m.status;
+if ([“IN_PLAY”,“PAUSED”].includes(s)) return “LIVE”;
+if (s === “HALFTIME”) return “HT”;
+if (s === “FINISHED”) return “FT”;
+return “UPCOMING”;
+}
+function liveMinute(m) { return m.minute ?? m.score?.minute ?? null; }
+function getScore(m) {
+const s = m.score;
+if (!s) return null;
+if ([“IN_PLAY”,“PAUSED”,“HALFTIME”].includes(m.status)) {
+const r = s.regular ?? s.fullTime;
+return r?.home != null ? r : null;
+}
+if (m.status === “FINISHED”) return s.fullTime?.home != null ? s.fullTime : null;
+return null;
+}
+function kickoffTime(m) {
+if (!m.utcDate) return “–:–”;
+return new Date(m.utcDate).toLocaleTimeString(“en-GB”,{hour:“2-digit”,minute:“2-digit”});
+}
+function kickoffDate(m) {
+if (!m.utcDate) return “”;
+const d = new Date(m.utcDate), today = new Date();
+const diff = Math.round((d - today) / 86400000);
+if (diff === 0) return “Today”;
+if (diff === 1) return “Tomorrow”;
+if (diff === -1) return “Yesterday”;
+return d.toLocaleDateString(“en-GB”,{weekday:“short”,day:“numeric”,month:“short”});
+}
+
+function Pulse({ color=”#ff3b3b”, label=“LIVE” }) {
+return (
+<span style={{display:“inline-flex”,alignItems:“center”,gap:4}}>
+<span style={{width:7,height:7,borderRadius:“50%”,background:color,display:“inline-block”,
+animation:“livePulse 1.4s infinite”,boxShadow:`0 0 0 0 ${color}99`}}/>
+<span style={{color,fontSize:10,fontWeight:800,letterSpacing:1}}>{label}</span>
+</span>
+);
+}
+
+function Ring({ value, color }) {
+const r=22,c=2*Math.PI*r,d=(value/100)*c;
+return (
+<svg width=“60” height=“60” viewBox=“0 0 60 60” style={{transform:“rotate(-90deg)”,flexShrink:0}}>
+<circle cx="30" cy="30" r={r} fill="none" stroke="rgba(255,255,255,.08)" strokeWidth="4"/>
+<circle cx=“30” cy=“30” r={r} fill=“none” stroke={color} strokeWidth=“4”
+strokeDasharray={`${d} ${c}`} strokeLinecap=“round”
+style={{transition:“stroke-dasharray 1s ease”,filter:`drop-shadow(0 0 6px ${color})`}}/>
+<text x=“30” y=“34” textAnchor=“middle” fill=“white” fontSize=“12” fontWeight=“700”
+style={{transform:“rotate(90deg)”,transformOrigin:“30px 30px”}}>{value}%</text>
+</svg>
+);
+}
+
+function Skeleton({ w=“100%”, h=12, r=6 }) {
+return <div style={{width:w,height:h,borderRadius:r,background:“rgba(255,255,255,.06)”,animation:“shimmer 1.6s ease-in-out infinite”}}/>;
+}
+
+function MatchCard({ match, league, onSelect }) {
+const p   = predict(match.homeTeam.name, match.awayTeam.name);
+const st  = uiStatus(match);
+const sc  = getScore(match);
+const min = liveMinute(match);
+const live= st===“LIVE”||st===“HT”;
+const ft  = st===“FT”;
+const max = Math.max(p.hw,p.dr,p.aw);
+const hN  = match.homeTeam.shortName||match.homeTeam.name;
+const aN  = match.awayTeam.shortName||match.awayTeam.name;
+
+return (
+<div onClick={()=>onSelect(match)} style={{
+background:“rgba(255,255,255,.04)”,border:“1px solid rgba(255,255,255,.07)”,
+borderRadius:16,padding:“15px 14px”,cursor:“pointer”,
+transition:“border .2s,transform .15s”,position:“relative”,overflow:“hidden”,
+}}
+onMouseEnter={e=>{e.currentTarget.style.border=`1px solid ${league.accent}55`;e.currentTarget.style.transform=“translateY(-1px)”;}}
+onMouseLeave={e=>{e.currentTarget.style.border=“1px solid rgba(255,255,255,.07)”;e.currentTarget.style.transform=“none”;}}>
+{live&&<div style={{position:“absolute”,top:0,left:0,right:0,height:2,
+background:`linear-gradient(90deg,transparent,${league.accent},transparent)`,
+animation:“scanLine 2.2s linear infinite”}}/>}
+
+```
+  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+    <div>
+      {live&&<Pulse color="#ff3b3b" label={st==="HT"?"HT":"LIVE"}/>}
+      {ft&&<span style={{color:"#888",fontSize:10,fontWeight:700,letterSpacing:1}}>FT</span>}
+      {st==="UPCOMING"&&<span style={{color:league.accent,fontSize:11,fontWeight:600}}>{kickoffDate(match)} · {kickoffTime(match)}</span>}
+    </div>
+    <div style={{background:`${league.accent}1a`,border:`1px solid ${league.accent}44`,
+      borderRadius:6,padding:"2px 8px",fontSize:9,color:league.accent,fontWeight:700,letterSpacing:1}}>
+      🤖 {p.conf}% conf
+    </div>
+  </div>
+
+  <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+    <div style={{flex:1,textAlign:"center"}}>
+      {match.homeTeam.crest
+        ?<img src={match.homeTeam.crest} width={36} height={36} alt={hN}
+           style={{objectFit:"contain",filter:"drop-shadow(0 2px 8px rgba(0,0,0,.7))"}}/>
+        :<div style={{fontSize:28}}>⚽</div>}
+      <div style={{color:"white",fontWeight:700,fontSize:11,marginTop:5,
+        fontFamily:"'Bebas Neue',cursive",letterSpacing:.5,lineHeight:1.2}}>{hN}</div>
+      {sc&&<div style={{color:"white",fontSize:34,fontWeight:900,
+        fontFamily:"'Bebas Neue',cursive",lineHeight:1.1}}>{sc.home}</div>}
+    </div>
+
+    <div style={{textAlign:"center",padding:"0 8px",minWidth:88}}>
+      {live&&min&&<div style={{color:"#ff3b3b",fontSize:11,fontWeight:700,marginBottom:2}}>{min}'</div>}
+      <div style={{color:"rgba(255,255,255,.22)",fontSize:15,marginBottom:6}}>vs</div>
+      <div style={{display:"flex",gap:4,justifyContent:"center"}}>
+        {[{l:"H",v:p.hw},{l:"D",v:p.dr},{l:"A",v:p.aw}].map(({l,v})=>(
+          <div key={l} style={{width:28,textAlign:"center",
+            background:v===max?`${league.accent}30`:"rgba(255,255,255,.05)",
+            border:v===max?`1px solid ${league.accent}`:"1px solid transparent",
+            borderRadius:6,padding:"3px 0"}}>
+            <div style={{fontSize:7,color:"rgba(255,255,255,.4)"}}>{l}</div>
+            <div style={{fontSize:11,color:v===max?league.accent:"white",fontWeight:700}}>{v}%</div>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <div style={{flex:1,textAlign:"center"}}>
+      {match.awayTeam.crest
+        ?<img src={match.awayTeam.crest} width={36} height={36} alt={aN}
+           style={{objectFit:"contain",filter:"drop-shadow(0 2px 8px rgba(0,0,0,.7))"}}/>
+        :<div style={{fontSize:28}}>⚽</div>}
+      <div style={{color:"white",fontWeight:700,fontSize:11,marginTop:5,
+        fontFamily:"'Bebas Neue',cursive",letterSpacing:.5,lineHeight:1.2}}>{aN}</div>
+      {sc&&<div style={{color:"white",fontSize:34,fontWeight:900,
+        fontFamily:"'Bebas Neue',cursive",lineHeight:1.1}}>{sc.away}</div>}
+    </div>
+  </div>
+
+  <div style={{display:"flex",gap:6,marginTop:14}}>
+    {[{l:"BTTS",v:`${p.btts}%`},{l:"O 2.5",v:`${p.o25}%`},{l:"Score",v:`${p.hg}-${p.ag}`},{l:"Tip",v:p.best.label.replace(" Win","")}].map(({l,v})=>(
+      <div key={l} style={{flex:1,background:"rgba(255,255,255,.04)",borderRadius:8,
+        padding:"5px 3px",textAlign:"center",border:"1px solid rgba(255,255,255,.06)"}}>
+        <div style={{fontSize:7,color:"rgba(255,255,255,.35)",marginBottom:2}}>{l}</div>
+        <div style={{fontSize:11,color:"white",fontWeight:700}}>{v}</div>
+      </div>
+    ))}
+  </div>
+</div>
+```
+
+);
+}
+
+function AIDrawer({ match, league, onClose }) {
+const [text,setText]=useState(””); const [busy,setBusy]=useState(true);
+const [err,setErr]=useState(””); const [dots,setDots]=useState(0);
+
+useEffect(()=>{const iv=setInterval(()=>setDots(d=>(d+1)%4),420);return()=>clearInterval(iv);},[]);
+
+useEffect(()=>{
+if(!match)return;
+setBusy(true);setText(””);setErr(””);
+const p=predict(match.homeTeam.name,match.awayTeam.name);
+const st=uiStatus(match); const sc=getScore(match);
+fetch(“https://api.anthropic.com/v1/messages”,{
+method:“POST”,headers:{“Content-Type”:“application/json”},
+body:JSON.stringify({
+model:“claude-sonnet-4-20250514”,max_tokens:1000,
+system:“You are PawsAI — elite football analyst on a premium predictions platform. Be sharp, confident, tactical. Use emoji section headers. Max 280 words. Direct and punchy.”,
+messages:[{role:“user”,content:
+`Analyse this ${league.name} fixture:\n\n${match.homeTeam.name} vs ${match.awayTeam.name}\n`+
+`Status: ${st}`+(sc?` | Live score: ${sc.home}-${sc.away}`:””)+`\n\n`+
+`AI probabilities:\n• Home win ${p.hw}% | Draw ${p.dr}% | Away win ${p.aw}%\n`+
+`• Predicted score: ${p.hg}-${p.ag} | BTTS ${p.btts}% | Over 2.5: ${p.o25}%\n`+
+`• Confidence: ${p.conf}% | Best tip: ${p.best.label} @ ${p.best.odds}\n\n`+
+`Deliver: tactical breakdown, key factors, top betting recommendation.`
+}],
+}),
+})
+.then(r=>r.json()).then(d=>{setText(d.content?.[0]?.text||“Analysis unavailable.”);setBusy(false);})
+.catch(()=>{setErr(“AI unavailable — check connection.”);setBusy(false);});
+},[match,league]);
+
+if(!match)return null;
+const p=predict(match.homeTeam.name,match.awayTeam.name);
+const sc=getScore(match);
+const hN=match.homeTeam.shortName||match.homeTeam.name;
+const aN=match.awayTeam.shortName||match.awayTeam.name;
+const max=Math.max(p.hw,p.dr,p.aw);
+
+return (
+<div style={{position:“fixed”,inset:0,background:“rgba(0,0,0,.88)”,backdropFilter:“blur(16px)”,
+zIndex:200,display:“flex”,alignItems:“flex-end”,justifyContent:“center”,animation:“fadeIn .18s ease”}}
+onClick={onClose}>
+<div onClick={e=>e.stopPropagation()} style={{
+width:“100%”,maxWidth:480,maxHeight:“93vh”,overflowY:“auto”,
+background:`linear-gradient(155deg,#0d1117 0%,${league.color}55 100%)`,
+border:`1px solid ${league.accent}33`,borderRadius:“22px 22px 0 0”,
+padding:“22px 18px 48px”,animation:“slideUp .32s cubic-bezier(.34,1.56,.64,1)”,
+}}>
+<div style={{width:38,height:4,background:“rgba(255,255,255,.18)”,borderRadius:2,margin:“0 auto 18px”}}/>
+
+```
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
+      <div style={{flex:1,paddingRight:12}}>
+        <div style={{color:league.accent,fontSize:9,fontWeight:700,letterSpacing:2,marginBottom:5}}>
+          🐾 PAWS AI · {league.name.toUpperCase()}
+        </div>
+        <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:22,letterSpacing:1,lineHeight:1.2}}>
+          {hN} <span style={{color:"rgba(255,255,255,.25)"}}>vs</span> {aN}
+        </div>
+        {sc&&<div style={{fontFamily:"'Bebas Neue',cursive",fontSize:32,color:league.accent,letterSpacing:3,marginTop:2}}>
+          {sc.home} – {sc.away}
+        </div>}
+      </div>
+      <Ring value={p.conf} color={league.accent}/>
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:14}}>
+      {[{label:hN,val:p.hw},{label:"Draw",val:p.dr},{label:aN,val:p.aw}].map(({label,val})=>(
+        <div key={label} style={{background:"rgba(255,255,255,.05)",borderRadius:12,padding:"11px 6px",
+          textAlign:"center",border:val===max?`1px solid ${league.accent}66`:"1px solid rgba(255,255,255,.07)"}}>
+          <div style={{color:"rgba(255,255,255,.4)",fontSize:8,marginBottom:4,lineHeight:1.3}}>{label}</div>
+          <div style={{color:val===max?league.accent:"white",fontSize:22,fontWeight:900,fontFamily:"'Bebas Neue',cursive"}}>{val}%</div>
+        </div>
+      ))}
+    </div>
+
+    <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:7,marginBottom:16}}>
+      {[{l:"Pred Score",v:`${p.hg}-${p.ag}`},{l:"BTTS",v:`${p.btts}%`},{l:"Over 2.5",v:`${p.o25}%`},{l:"Best Odds",v:p.best.odds}].map(({l,v})=>(
+        <div key={l} style={{background:`${league.accent}0e`,border:`1px solid ${league.accent}22`,borderRadius:10,padding:"8px 4px",textAlign:"center"}}>
+          <div style={{color:"rgba(255,255,255,.38)",fontSize:7,marginBottom:3}}>{l}</div>
+          <div style={{color:league.accent,fontSize:13,fontWeight:800}}>{v}</div>
+        </div>
+      ))}
+    </div>
+
+    <div style={{background:"rgba(255,255,255,.035)",borderRadius:14,
+      border:"1px solid rgba(255,255,255,.07)",padding:16,minHeight:130}}>
+      {busy?(
+        <div>
+          <div style={{color:league.accent,fontWeight:700,fontSize:10,letterSpacing:1,marginBottom:12}}>
+            🤖 ANALYSING{".".repeat(dots)}
+          </div>
+          {["Pulling live match data…","Scanning tactical patterns…","Generating prediction report…"].map((t,i)=>(
+            <div key={i} style={{display:"flex",alignItems:"center",gap:8,marginBottom:9,
+              opacity:dots>i?1:.2,transition:"opacity .3s ease"}}>
+              <div style={{width:5,height:5,borderRadius:"50%",background:league.accent,flexShrink:0}}/>
+              <span style={{color:"rgba(255,255,255,.5)",fontSize:12}}>{t}</span>
+            </div>
+          ))}
+        </div>
+      ):err?(
+        <div style={{color:"#ff6b6b",fontSize:12}}>{err}</div>
+      ):(
+        <div style={{color:"rgba(255,255,255,.82)",fontSize:13,lineHeight:1.85,whiteSpace:"pre-wrap"}}>{text}</div>
+      )}
+    </div>
+
+    <div style={{marginTop:14,padding:"13px 16px",background:`${league.accent}0f`,
+      borderRadius:12,border:`1px solid ${league.accent}33`}}>
+      <div style={{color:league.accent,fontSize:9,fontWeight:700,letterSpacing:1.5,marginBottom:4}}>🎯 TOP TIP</div>
+      <div style={{color:"white",fontSize:17,fontWeight:900,fontFamily:"'Bebas Neue',cursive",letterSpacing:.5}}>
+        {p.best.label.toUpperCase()} @ {p.best.odds}
+      </div>
+      <div style={{color:"rgba(255,255,255,.4)",fontSize:10,marginTop:2}}>
+        {p.conf}% AI Confidence · {p.best.value}% probability
+      </div>
+    </div>
+
+    <button onClick={onClose} style={{marginTop:18,width:"100%",padding:13,
+      background:"rgba(255,255,255,.06)",border:"1px solid rgba(255,255,255,.1)",
+      borderRadius:12,color:"rgba(255,255,255,.7)",fontSize:13,fontWeight:700,cursor:"pointer",letterSpacing:.5}}>
+      ↓ Close
+    </button>
+  </div>
+</div>
+```
+
+);
+}
+
+export default function App() {
+const [league,setLeague]=useState(LEAGUES[0]);
+const [matches,setMatches]=useState([]);
+const [loading,setLoading]=useState(true);
+const [error,setError]=useState(””);
+const [selected,setSelected]=useState(null);
+const [filter,setFilter]=useState(“ALL”);
+const [updated,setUpdated]=useState(null);
+const [spinning,setSpinning]=useState(false);
+const [tick,setTick]=useState(0);
+const timerRef=useRef(null);
+
+useEffect(()=>{ const iv=setInterval(()=>setTick(t=>t+1),1000); return()=>clearInterval(iv); },[]);
+
+const loadMatches=useCallback(async(lid,soft=false)=>{
+if(soft)setSpinning(true); else setLoading(true);
+setError(””);
+try{
+const today=new Date();
+const from=new Date(today); from.setDate(today.getDate()-1);
+const to=new Date(today); to.setDate(today.getDate()+6);
+const fmt=d=>d.toISOString().split(“T”)[0];
+const qs=new URLSearchParams({path:`/v4/competitions/${lid}/matches`,dateFrom:fmt(from),dateTo:fmt(to)});
+const res=await fetch(`${PROXY_URL}/api/football?${qs}`);
+if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.message||`HTTP ${res.status}`);}
+const data=await res.json();
+const sorted=(data.matches||[]).sort((a,b)=>{
+const o={IN_PLAY:0,PAUSED:0,HALFTIME:0,FINISHED:1,TIMED:2,SCHEDULED:2};
+return (o[a.status]??3)-(o[b.status]??3)||new Date(a.utcDate)-new Date(b.utcDate);
+});
+setMatches(sorted); setUpdated(new Date());
+}catch(e){setError(e.message||“Failed to load. Check proxy URL.”);}
+finally{setLoading(false);setSpinning(false);}
+},[]);
+
+useEffect(()=>{ setMatches([]); setSelected(null); loadMatches(league.id); },[league,loadMatches]);
+useEffect(()=>{
+clearInterval(timerRef.current);
+timerRef.current=setInterval(()=>loadMatches(league.id,true),REFRESH_MS);
+return()=>clearInterval(timerRef.current);
+},[league,loadMatches]);
+
+const liveCount=matches.filter(m=>[“IN_PLAY”,“PAUSED”,“HALFTIME”].includes(m.status)).length;
+const visible=matches.filter(m=>{
+const s=uiStatus(m);
+if(filter===“LIVE”)return s===“LIVE”||s===“HT”;
+if(filter===“UPCOMING”)return s===“UPCOMING”;
+if(filter===“FT”)return s===“FT”;
+return true;
+});
+const now=new Date();
+
+return (
+<div style={{minHeight:“100vh”,background:”#080b10”,fontFamily:”‘DM Sans’,sans-serif”,
+color:“white”,maxWidth:480,margin:“0 auto”,position:“relative”}}>
+<style>{`@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700;800;900&display=swap'); *{box-sizing:border-box;margin:0;padding:0}::-webkit-scrollbar{width:0} @keyframes livePulse{0%{box-shadow:0 0 0 0 rgba(255,59,59,.7)}70%{box-shadow:0 0 0 9px rgba(255,59,59,0)}100%{box-shadow:0 0 0 0 rgba(255,59,59,0)}} @keyframes scanLine{0%{transform:translateX(-100%)}100%{transform:translateX(200%)}} @keyframes fadeIn{from{opacity:0}to{opacity:1}} @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}} @keyframes shimmer{0%,100%{opacity:.35}50%{opacity:.7}} @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}} @keyframes gridDrift{0%{background-position:0 0}100%{background-position:40px 40px}}`}</style>
+
+```
+  <div style={{position:"fixed",inset:0,pointerEvents:"none",zIndex:0,
+    backgroundImage:"linear-gradient(rgba(255,255,255,.016) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.016) 1px,transparent 1px)",
+    backgroundSize:"40px 40px",animation:"gridDrift 6s linear infinite"}}/>
+  <div style={{position:"fixed",top:-140,left:"50%",transform:"translateX(-50%)",
+    width:520,height:520,borderRadius:"50%",pointerEvents:"none",zIndex:0,transition:"background .7s ease",
+    background:`radial-gradient(circle,${league.color}55 0%,transparent 68%)`}}/>
+
+  <div style={{position:"relative",zIndex:1}}>
+    <div style={{padding:"18px 16px 0",background:"linear-gradient(180deg,rgba(8,11,16,.98) 0%,transparent 100%)",
+      position:"sticky",top:0,zIndex:10}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:14}}>
+        <div>
+          <div style={{display:"flex",alignItems:"center",gap:9}}>
+            <span style={{fontSize:26,lineHeight:1}}>🐾</span>
+            <span style={{fontFamily:"'Bebas Neue',cursive",fontSize:32,letterSpacing:2}}>PAWS AI</span>
+            <span style={{background:"linear-gradient(135deg,#ff6b00,#ffd700)",borderRadius:6,
+              padding:"2px 9px",fontSize:9,fontWeight:900,color:"#000",letterSpacing:1}}>LIVE</span>
+          </div>
+          <div style={{color:"rgba(255,255,255,.3)",fontSize:9,letterSpacing:1.5,marginTop:1}}>
+            REAL-TIME AI FOOTBALL INTELLIGENCE
+          </div>
+        </div>
+        <div style={{textAlign:"right"}}>
+          <div style={{color:"rgba(255,255,255,.45)",fontSize:11,fontVariantNumeric:"tabular-nums"}}>
+            {now.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}
+          </div>
+          {liveCount>0&&(
+            <div style={{display:"flex",alignItems:"center",gap:4,justifyContent:"flex-end",marginTop:3}}>
+              <Pulse/><span style={{color:"rgba(255,255,255,.4)",fontSize:9}}>{liveCount} live</span>
+            </div>
+          )}
+          <div style={{color:"rgba(255,255,255,.2)",fontSize:8,marginTop:2}}>
+            {spinning?"🔄 syncing…":updated?`⚡ ${updated.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}`:""}
+          </div>
+        </div>
+      </div>
+
+      <div style={{display:"flex",gap:7,overflowX:"auto",paddingBottom:10,scrollbarWidth:"none"}}>
+        {LEAGUES.map(lg=>(
+          <button key={lg.id} onClick={()=>setLeague(lg)} style={{
+            flexShrink:0,padding:"8px 11px",borderRadius:11,
+            background:league.id===lg.id?`linear-gradient(135deg,${lg.color}f0,${lg.color}88)`:"rgba(255,255,255,.05)",
+            border:league.id===lg.id?`1px solid ${lg.accent}66`:"1px solid transparent",
+            color:league.id===lg.id?"white":"rgba(255,255,255,.4)",
+            fontSize:11,fontWeight:700,cursor:"pointer",transition:"all .2s",
+            display:"flex",flexDirection:"column",alignItems:"center",gap:2,
+            boxShadow:league.id===lg.id?`0 4px 18px ${lg.color}66`:"none",
+          }}>
+            <span style={{fontSize:15}}>{lg.country}</span>
+            <span style={{letterSpacing:.5}}>{lg.short}</span>
+          </button>
+        ))}
+      </div>
+
+      <div style={{marginBottom:10}}>
+        <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:22,letterSpacing:2}}>{league.name}</div>
+        <div style={{height:2,width:36,background:`linear-gradient(90deg,${league.accent},transparent)`,marginTop:3,borderRadius:1}}/>
+      </div>
+
+      <div style={{display:"flex",gap:6,marginBottom:14,alignItems:"center"}}>
+        {["ALL","LIVE","UPCOMING","FT"].map(f=>(
+          <button key={f} onClick={()=>setFilter(f)} style={{
+            padding:"5px 12px",borderRadius:20,
+            background:filter===f?league.accent:"rgba(255,255,255,.06)",
+            border:"none",color:filter===f?"#000":"rgba(255,255,255,.42)",
+            fontSize:10,fontWeight:800,cursor:"pointer",letterSpacing:.8,transition:"all .18s",
+          }}>{f}</button>
+        ))}
+        <button onClick={()=>loadMatches(league.id,true)} style={{
+          marginLeft:"auto",width:30,height:30,display:"flex",alignItems:"center",justifyContent:"center",
+          background:"rgba(255,255,255,.07)",border:"1px solid rgba(255,255,255,.1)",
+          borderRadius:8,color:"rgba(255,255,255,.6)",fontSize:15,cursor:"pointer",
+          animation:spinning?"spin .8s linear infinite":"none",
+        }}>↻</button>
+      </div>
+    </div>
+
+    <div style={{padding:"4px 12px 110px",display:"flex",flexDirection:"column",gap:10}}>
+      {loading?(
+        Array.from({length:5}).map((_,i)=>(
+          <div key={i} style={{background:"rgba(255,255,255,.04)",borderRadius:16,padding:16,opacity:1-i*.15}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:12}}>
+              <Skeleton w={70} h={9}/><Skeleton w={100} h={9}/>
+            </div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+              <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:7}}>
+                <Skeleton w={38} h={38} r={19}/><Skeleton w={55} h={9}/>
+              </div>
+              <Skeleton w={80} h={55} r={10}/>
+              <div style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:7}}>
+                <Skeleton w={38} h={38} r={19}/><Skeleton w={55} h={9}/>
+              </div>
+            </div>
+          </div>
+        ))
+      ):error?(
+        <div style={{textAlign:"center",padding:"48px 20px"}}>
+          <div style={{fontSize:36,marginBottom:12}}>⚠️</div>
+          <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:20,color:"#ff6b6b",letterSpacing:2,marginBottom:8}}>Connection Error</div>
+          <div style={{color:"rgba(255,255,255,.4)",fontSize:12,lineHeight:1.7,marginBottom:8}}>{error}</div>
+          <div style={{background:"rgba(255,200,0,.08)",border:"1px solid rgba(255,200,0,.2)",
+            borderRadius:10,padding:"12px 14px",textAlign:"left",marginBottom:20}}>
+            <div style={{color:"#ffd700",fontSize:10,fontWeight:700,marginBottom:6,letterSpacing:1}}>🔧 SETUP REQUIRED</div>
+            <div style={{color:"rgba(255,255,255,.55)",fontSize:11,lineHeight:1.8}}>
+              1. Deploy the <strong style={{color:"white"}}>pawsai-proxy</strong> folder to Vercel<br/>
+              2. Copy your deployment URL<br/>
+              3. Replace <code style={{color:"#ffd700",background:"rgba(0,0,0,.3)",padding:"1px 4px",borderRadius:3}}>PROXY_URL</code> at the top of this file
+            </div>
+          </div>
+          <button onClick={()=>loadMatches(league.id)} style={{padding:"11px 28px",borderRadius:10,
+            background:league.accent,border:"none",color:"#000",fontWeight:800,cursor:"pointer",fontSize:12}}>Retry</button>
+        </div>
+      ):visible.length===0?(
+        <div style={{textAlign:"center",padding:"48px 20px"}}>
+          <div style={{fontSize:34,marginBottom:10}}>🐾</div>
+          <div style={{fontFamily:"'Bebas Neue',cursive",fontSize:18,color:"rgba(255,255,255,.35)",letterSpacing:2}}>
+            No {filter!=="ALL"?filter:""} matches
+          </div>
+          <div style={{color:"rgba(255,255,255,.2)",fontSize:11,marginTop:6}}>Try another league or filter</div>
+        </div>
+      ):visible.map(m=>(
+        <MatchCard key={m.id} match={m} league={league} onSelect={setSelected}/>
+      ))}
+    </div>
+
+    <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",
+      width:"100%",maxWidth:480,
+      background:"linear-gradient(0deg,rgba(8,11,16,1) 60%,transparent 100%)",
+      padding:"16px 14px 22px"}}>
+      <div style={{background:"rgba(255,255,255,.04)",border:"1px solid rgba(255,255,255,.08)",
+        borderRadius:13,padding:"9px 14px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span style={{color:"rgba(255,255,255,.5)",fontSize:11}}>🤖 Tap any match for AI deep analysis</span>
+        <div style={{display:"flex",alignItems:"center",gap:5}}>
+          <div style={{width:7,height:7,borderRadius:"50%",background:"#00ff85",
+            boxShadow:"0 0 8px #00ff85",animation:"livePulse 2s infinite"}}/>
+          <span style={{color:"rgba(255,255,255,.22)",fontSize:8}}>30s</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  {selected&&<AIDrawer match={selected} league={league} onClose={()=>setSelected(null)}/>}
+</div>
+```
+
+);
+}
